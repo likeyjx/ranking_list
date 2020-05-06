@@ -6,8 +6,7 @@ from django.http import JsonResponse
 import jwt
 import json
 
-from ranking.user.models import UserProfile
-
+from user.models import UserProfile
 
 def login_check(func):
     '''
@@ -17,17 +16,26 @@ def login_check(func):
         # 从request里取token,假设username从token中拿,token_key是123456
         token = request.META.get('HTTP_AUTHORIZATION')
         if not token:
-            return None
+            result = {'code': 10086, 'error': 'Please login!'}
+            return JsonResponse(result)
         try:
-            res = jwt.decode(token,123456)
+            res = jwt.decode(token,key='123456',algorithms=['HS256',])
+            print(res)
         except Exception as e :
+            print(e)
             result = {'code':10086,'error':'Please login'}
             return JsonResponse(result)
+        except jwt.ExpiredSignatureError:
+            #token过期
+            result = {'code':10086, 'error':'Please login.'}
+            return JsonResponse(result)
         username = res['user']
+        print(username,type(username))
         try:
             # 校验用户名是否存在,UserProfile是用户表
-            old_user = UserProfile.object.get(username=username)
+            old_user = UserProfile.objects.get(username=username)
         except Exception as e:
+            print(e)
             result = {'code':10010,'error':'User is wrong'}
             return JsonResponse(result)
         request.user = username
@@ -46,7 +54,9 @@ class Ranking_list(View):
         不成功随机5位数
         '''
         user = request.user
-        json_obj = json.loads(request.body)
+        body = request.body
+        print(body.decode())
+        json_obj = json.loads(body.decode())
         password = json_obj['password']
         m = hashlib.md5()
         m.update(password.encode())
@@ -61,7 +71,8 @@ class Ranking_list(View):
             result = {'code':10098,'error':'Please give me rank'}
             return JsonResponse(result)
         redis_conn = get_redis_connection('Ranking_list')
-        redis_conn.zadd(rank,user)
+        print(rank,user)
+        redis_conn.zadd('Ranking_list',{user:rank})
         result = {'code':200,'data':'ok'}
         return JsonResponse(result)
 
@@ -72,7 +83,14 @@ class Ranking_list(View):
         返回200,和查询出来的rank区段，以及自己的排名
         '''
         user = request.user
-        json_obj = json.loads(request.body)
+        start = 0
+        stop = 9
+        json_obj = json.loads(request.body.decode())
+        user_version = ''
+        try:
+            user_version = json_obj['version']
+        except Exception as e:
+            print('没有版本信息')
         try:
             scope = json_obj['arange']
             if len(scope) == 2:
@@ -83,18 +101,21 @@ class Ranking_list(View):
         try:
             rank = int(json_obj['rank'])
         except Exception as e :
-            result = {'code':10098,'error':'Please give me rank'}
+            result = {"code":10098,"error":"Please give me rank"}
             return JsonResponse(result)
         redis_conn = get_redis_connection('Ranking_list')
-        redis_conn.zadd(rank,user)
-        user_rank = int(redis_conn.zrank(user))+1
+        redis_conn.zadd('Ranking_list',{user:rank})
+        user_rank = int(redis_conn.zrevrank('Ranking_list',user)) +1
         me = {}
-        me['ranking'] = user_rank
+        me['rank_top'] = user_rank
         me['user'] = user
         me['rank_score'] = rank
         rank_list = ranking_list(start,stop)
         rank_list.append(me)
-        result = {'code':200,'data':rank_list}
+        result = {"code":200,"data":{"rank_list":rank_list}}
+        if user_version != '':
+            version = compare_version(user_version)
+            result['data']['version'] = version
         return JsonResponse(result)
 
 
@@ -106,14 +127,48 @@ def ranking_list(start=0,stop=9):
     从redis中拿想要的区段，默认第1至10名
     '''
     redis_conn = get_redis_connection('Ranking_list')
-    rank_ = redis_conn.zrevarange(start,stop)
+    rank_ = redis_conn.zrevrange('Ranking_list',start,stop,withscores=True)
     if not rank_:
         return
     rank_list = []
-    i = 1
-    for k in range(0,len(rank_),2):
+    i = 0
+    for rank in rank_:
         user = {}
-        user['ranking'] = i
-        user['user'] = rank_[k]
-        user['rank_score'] = rank_[k+1]
+        i += 1
+        user['rank_top'] = i
+        # b'' 需要decode()
+        user['user'] = rank[0].decode()
+        # float 不需要decode()
+        user['rank_score'] = rank[1]
+        rank_list.append(user)
     return rank_list
+
+def compare_version(version):
+    '''
+        比较查看客户端版本与服务器版本
+    :param version: 客户端的版本号
+    :return: 客户端小为-1,客户端大为1(基本不可能),其余为0
+    '''
+    now_version = '3.00.3.1'
+    nv = now_version.split('.')
+    ver = version.split('.')
+    nv = [int(k) for k in nv]
+    ver = [int(c) for c in ver]
+    if len(ver) <= len(nv):
+        for i in range(len(ver)):
+            if ver[i] < nv[i] :
+                return -1
+            elif ver[i] == nv[i] and i != len(ver)-1:
+                continue
+            elif ver[i] == nv[i] and i == len(ver)-1 and i == len(nv)-1:
+                return 0
+            elif i == len(ver)-1 and i != len(nv)-1:
+                for k in range(1,len(nv)-i):
+                    if nv[-k] != 0:
+                        return -1
+                return
+            else:
+                return 1
+    else:
+        return 1
+
